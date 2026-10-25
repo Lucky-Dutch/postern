@@ -1,6 +1,15 @@
 #!/bin/sh
+# Builds dist/Postern.app. With --install, copies it to /Applications, or to
+# ~/Applications when /Applications is not writable, and removes the copy in
+# dist/, so Spotlight and the Apps view list Postern once.
 set -eu
 cd "$(dirname "$0")/.."
+install=false
+case "${1:-}" in
+  --install) install=true ;;
+  "") ;;
+  *) printf 'usage: %s [--install]\n' "$0" >&2; exit 2 ;;
+esac
 CARGO=${CARGO:-cargo}
 "$CARGO" build --release --locked
 bundle="dist/Postern.app"
@@ -28,3 +37,16 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 PLIST
 codesign --force --sign - "$bundle"
 printf 'Built %s\n' "$bundle"
+if [ "$install" = true ]; then
+  lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+  applications=/Applications
+  if [ ! -w "$applications" ]; then
+    applications="$HOME/Applications"
+    mkdir -p "$applications"
+  fi
+  ditto "$bundle" "$applications/Postern.app"
+  "$lsregister" -u "$PWD/$bundle" >/dev/null 2>&1 || true
+  rm -rf "$bundle"
+  "$lsregister" -f "$applications/Postern.app"
+  printf 'Installed %s/Postern.app\n' "$applications"
+fi
