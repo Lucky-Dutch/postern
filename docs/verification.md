@@ -82,6 +82,15 @@ PostgreSQL 19rc1, 18.6, 16.15, and 14 from Postgres.app.
   the real Keychain.
 - Release build: `scripts/bundle-macos.sh` built and ad-hoc signed the arm64
   `Postern.app` with the mammoth icon from `assets/Postern.icns`.
+- `./install.sh --no-open` checked the command line tools and the pinned Rust,
+  built and installed `/Applications/Postern.app`, left no copy in `dist/`, and
+  noticed that Postern was running instead of opening it. The branches that
+  install the command line tools or Rust on a Mac without them were not run.
+- `scripts/make-dmg.sh` built a 7.5 MB `Postern-0.1.0-arm64.dmg`. Mounted
+  read-only, it held the signed app, an Applications shortcut, and the Postern
+  volume icon, and `hdiutil verify` reported a valid checksum. Opening a
+  downloaded, quarantined copy through Gatekeeper was not tried, and the release
+  workflow has not run on GitHub.
 
 The smoke harness drives application state and database commands, not physical
 mouse and keyboard input, and captures only the application's framebuffer, so

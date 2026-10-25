@@ -151,28 +151,168 @@ a fast native core, careful data handling, and built-in diagnostics.
 
 ## 🚀 Quick start
 
-You need [Rust](https://rustup.rs/) and the Xcode command line tools. The
-repository pins Rust 1.99.1 and includes `Cargo.lock`.
+Postern runs on macOS 13 or later. It is tested on Apple Silicon; Intel Macs
+should build from source but have not been tested.
+
+### Download the app
+
+The easiest way, with no developer tools:
+
+1. Download `Postern-<version>-arm64.dmg` from the
+   [latest release](../../releases/latest).
+2. Open it and drag **Postern** onto **Applications**.
+3. Open Postern from Applications. Releases are not notarized by Apple yet, so the
+   first time macOS says it cannot verify the app. Open **System Settings ›
+   Privacy & Security**, choose **Open Anyway** next to the message about
+   Postern, and confirm. On macOS 13 and 14 you can instead Control-click the app,
+   choose **Open**, and confirm.
+4. To keep Postern in the Dock, right-click its icon and choose **Options › Keep in
+   Dock**.
+
+### Build it with one command
+
+If you have the source, or want the latest changes, one script does the rest:
+
+```sh
+git clone <repository-url> postern
+cd postern
+./install.sh
+```
+
+`install.sh` checks the Xcode command line tools and opens their installer when
+they are missing. It installs Rust with [rustup](https://rustup.rs/) when Rust is
+missing, then the version the project pins. Finally it builds Postern, installs it
+in `/Applications`, and opens it. The first build takes a few minutes. Use
+`./install.sh --no-open` to skip opening the app.
+
+<details>
+<summary><b>Build it step by step</b></summary>
+<br/>
+
+##### 1. Install the developer tools
+
+The Xcode command line tools provide Git and the linker that Rust uses on macOS:
+
+```sh
+xcode-select --install
+```
+
+Install Rust with [rustup](https://rustup.rs/), the official installer, and accept
+the default options:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Make `cargo` available in this terminal and in every new one, then check it:
+
+```sh
+echo '. "$HOME/.cargo/env"' >> ~/.zshrc
+source ~/.zshrc
+cargo --version
+```
+
+##### 2. Get the code
+
+Clone the repository, using its address in place of `<repository-url>`, and install
+the Rust version the project pins:
+
+```sh
+git clone <repository-url> postern
+cd postern
+rustup toolchain install
+```
+
+`rustup toolchain install` reads `rust-toolchain.toml` and installs Rust 1.99.1
+with rustfmt and clippy. Every `cargo` command in this folder uses that version.
+
+##### 3. Run Postern from source
 
 ```sh
 cargo run --release --locked
 ```
 
-Build an application that opens from Finder:
+The first build downloads and compiles the dependencies, which takes a few
+minutes; later runs start in seconds. `--locked` builds exactly the versions in
+`Cargo.lock`. The window opens on the server list.
+
+##### 4. Install it as a Mac app
 
 ```sh
-sh scripts/bundle-macos.sh
-open dist/Postern.app
+sh scripts/bundle-macos.sh --install
 ```
 
-The bundle targets the current machine's architecture and is signed locally with an
-ad-hoc signature; it is not a notarized release. No browser, webview, or separate
-application server is involved.
+This builds `Postern.app`, signs it locally, copies it to `/Applications`, and
+registers it, so Postern appears in Spotlight and the Applications folder. Open
+it, then right-click its icon in the Dock and choose **Options › Keep in Dock**.
 
-> [!TIP]
-> Using [Postgres.app](https://postgresapp.com)? Choose **+ New Server**, keep host
-> `localhost` and port `5432`, and connect. **Show Databases** lists every database
-> on the server before you pick one.
+Without `--install`, the script leaves the application in `dist/Postern.app`, and
+Spotlight then lists it next to an installed copy. The app is built for the
+current machine's architecture with a local ad-hoc signature.
+
+</details>
+
+### Connect to PostgreSQL
+
+Postern needs a running PostgreSQL server. Any of these works:
+
+| Server | Start it | Connection in Postern |
+| --- | --- | --- |
+| [Postgres.app](https://postgresapp.com) | Open the app, then **Initialize** the first time or **Start** | Host `localhost`, port `5432`, your macOS user name, no password |
+| [Homebrew](https://brew.sh) | `brew install postgresql@17`, then `brew services start postgresql@17` | Host `localhost`, port `5432`, your macOS user name, no password |
+| [Docker](https://www.docker.com) | `docker run -d --name postgres -e POSTGRES_PASSWORD=secret -p 5432:5432 postgres:17` | Host `localhost`, port `5432`, user `postgres`, password `secret` |
+| A remote server | Ask its administrator for a connection URL | **New Server from URL...** and paste the `postgresql://` URL |
+
+Then, in Postern:
+
+1. Choose **+ New Server**. The form starts with host `localhost`, port `5432`,
+   database `postgres`, and your macOS user name.
+2. Change what differs for your server. Enter a password if it needs one, and tick
+   **Save password in macOS Keychain** to remember it.
+3. Choose **Test**, then **Connect**. **Show Databases** lists the server's
+   databases if you are not sure which one to open.
+
+Postgres.app asks once whether Postern may connect; allow it.
+
+### Updating
+
+Download the new disk image and drag Postern onto Applications again, replacing
+the old copy. From source, quit Postern and run:
+
+```sh
+git pull
+./install.sh
+```
+
+### Sharing and releasing
+
+`sh scripts/make-dmg.sh` builds `dist/Postern-<version>-<architecture>.dmg`, a disk
+image that installs by dragging the app onto Applications. Pushing a version tag,
+such as `v0.1.0`, to GitHub runs the release workflow, which builds the image and
+publishes it as a GitHub release for the download link above.
+
+### Uninstalling
+
+Delete `/Applications/Postern.app`. Saved servers, queries, and settings are in
+`~/Library/Application Support/dev.postern.Postern`, and saved passwords are in
+Keychain Access under `dev.postern.database`; remove them too for a clean slate.
+
+<details>
+<summary><b>Troubleshooting</b></summary>
+<br/>
+
+| Problem | Fix |
+| --- | --- |
+| `zsh: command not found: cargo` | Run `source "$HOME/.cargo/env"`, and add it to `~/.zshrc` as in step 1. |
+| `xcrun: error: invalid active developer path` | Install the command line tools with `xcode-select --install`. |
+| `toolchain '1.99.1-…' is not installed` | Run `rustup toolchain install` in the project folder. |
+| Spotlight or the Apps view lists Postern twice | Delete `dist/Postern.app`, or build with `--install`, which removes it. |
+| `Connection refused` | The server is not running or uses another port. Start it, and check the port in the connection form. |
+| `password authentication failed` | Check the user name and password. An empty password field falls back to `~/.pgpass`. |
+| macOS says it cannot verify Postern | The release is not notarized. Allow it once in **System Settings › Privacy & Security** with **Open Anyway**. |
+| macOS asks to use a Keychain item | Choose **Always Allow**. It asks again after each rebuild, because every build gets a new local signature. |
+
+</details>
 
 <br/>
 
