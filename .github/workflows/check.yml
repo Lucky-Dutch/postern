@@ -1,0 +1,13 @@
+name: Check
+on: [push, pull_request]
+jobs:
+  rust:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked
+      - run: brew install postgresql@17
+      - run: PG_BIN="$(brew --prefix postgresql@17)/bin" sh scripts/test-postgres.sh
