@@ -174,7 +174,7 @@ The easiest way, with no developer tools:
 If you have the source, or want the latest changes, one script does the rest:
 
 ```sh
-git clone <repository-url> postern
+git clone https://github.com/Lucky-Dutch/postern.git
 cd postern
 ./install.sh
 ```
@@ -214,11 +214,10 @@ cargo --version
 
 ##### 2. Get the code
 
-Clone the repository, using its address in place of `<repository-url>`, and install
-the Rust version the project pins:
+Clone the repository and install the Rust version the project pins:
 
 ```sh
-git clone <repository-url> postern
+git clone https://github.com/Lucky-Dutch/postern.git
 cd postern
 rustup toolchain install
 ```
