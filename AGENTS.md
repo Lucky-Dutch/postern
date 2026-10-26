@@ -17,4 +17,5 @@ Rust desktop PostgreSQL client using eframe/egui, Tokio, and tokio-postgres.
 - Run cargo fmt --check, cargo clippy --locked --all-targets --all-features -- -D warnings,
   cargo test --locked, and relevant database/native smoke tests.
 - Do not create branches, stage, commit, push, or configure remotes unless requested.
+- Do not add Co-Authored-By or other AI attribution lines to commits or pull requests.
 - Code and repository documentation are English. Respond in the user's language.
