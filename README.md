@@ -288,7 +288,9 @@ git pull
 `sh scripts/make-dmg.sh` builds `dist/Postern-<version>-<architecture>.dmg`, a disk
 image that installs by dragging the app onto Applications. Pushing a version tag,
 such as `v0.1.0`, to GitHub runs the release workflow, which builds the image and
-publishes it as a GitHub release for the download link above.
+publishes it as a GitHub release for the download link above. Both the image name
+and the app's version come from `version` in `Cargo.toml`, so to release, raise it
+there, commit, and push a matching tag, such as `v0.1.1`.
 
 ### Uninstalling
 
