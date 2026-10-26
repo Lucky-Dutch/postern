@@ -1,5 +1,31 @@
 # Verification
 
+## Clipboard regression, 2026-10-26
+
+Verified on macOS 26.4.1, Apple Silicon, Rust 1.99.1, and disposable PostgreSQL
+19rc1 clusters. The new `clipboard` scenario in
+[`src/ui/app/smoke.rs`](../src/ui/app/smoke.rs) failed before enabling eframe's
+`clipboard` feature: `pbpaste` could not see the text sent through `copy_text`.
+The same scenario passed after the feature and its lockfile dependencies were
+enabled. It checks the output path used by Copy buttons, a selected SQL fragment
+with Polish and Chinese characters and a newline, and a native paste into the
+editor. It checks actual system clipboard contents without printing them on
+failure.
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --locked`: all 54 unit tests passed.
+- `scripts/test-postgres.sh`: all 13 database integration tests passed.
+- Native smoke scenarios `clipboard`, `slow_queries`, `query`, and `selection`:
+  passed. The clipboard capture was visually inspected.
+
+The copy event is injected into egui, and paste is requested through eframe.
+Physical Command-C/Command-V key presses and clicking the Slow queries Copy
+button were not automated. The Copy button uses the same tested `copy_text`
+output path. The test replaces the system clipboard with fixture text.
+
+## Full application verification, 2026-10-25
+
 Verified on 2026-10-25 on macOS 26.4.1, Apple Silicon (arm64), Rust 1.99.1, with
 PostgreSQL 19rc1, 18.6, 16.15, and 14 from Postgres.app.
 

@@ -11,6 +11,22 @@ const UNICODE_SAMPLES: &[&str] = &[
     "Zażółć gęślą jaźń",
 ];
 
+#[cfg(target_os = "macos")]
+const CLIPBOARD_SQL: &str = "SELECT 'Zażółć gęślą jaźń', '抹茶';\n";
+
+#[cfg(target_os = "macos")]
+fn assert_clipboard(expected: &str) {
+    let output = std::process::Command::new("/usr/bin/pbpaste")
+        .output()
+        .expect("Read the macOS clipboard");
+    assert!(output.status.success(), "pbpaste failed");
+    // Do not print clipboard contents when the native backend is broken.
+    assert!(
+        output.stdout == expected.as_bytes(),
+        "The system clipboard did not receive the copied text"
+    );
+}
+
 pub(super) struct Smoke {
     screen: String,
     phase: u8,
@@ -94,6 +110,20 @@ impl PosternApp {
             assert!(self.connected.is_none());
             smoke.phase = 2;
         } else if smoke.phase == 0 && self.connected.is_some() && !self.busy.any() {
+            #[cfg(target_os = "macos")]
+            if smoke.screen == "clipboard" {
+                // The same output path used by the Slow queries Copy button.
+                ctx.copy_text("SELECT $1::text;\n".into());
+                let prefix = "-- clipboard\n";
+                self.open_in_editor("Clipboard".into(), format!("{prefix}{CLIPBOARD_SQL}"));
+                let id = self.documents[self.document_index].id;
+                let start = prefix.chars().count();
+                self.pending_select = Some((id, start..start + CLIPBOARD_SQL.chars().count()));
+                ctx.memory_mut(|memory| memory.request_focus(egui::Id::unique(("sql_editor", id))));
+                smoke.phase = 14;
+                self.smoke = Some(smoke);
+                return;
+            }
             if smoke.screen == "routine" {
                 let routine = self
                     .routines
@@ -527,6 +557,31 @@ impl PosternApp {
             assert_eq!(self.table_page.result.rows.len(), 1);
             assert_eq!(self.back_stack.len(), 1);
             smoke.phase = 2;
+        }
+        #[cfg(target_os = "macos")]
+        match smoke.phase {
+            14 if self.pending_select.is_none() => {
+                assert_clipboard("SELECT $1::text;\n");
+                // egui-winit translates Command-C into this event.
+                ctx.input_mut(|input| input.events.push(egui::Event::Copy));
+                smoke.phase = 15;
+            }
+            15 => {
+                assert_clipboard(CLIPBOARD_SQL);
+                self.documents[self.document_index].sql.clear();
+                let id = self.documents[self.document_index].id;
+                self.pending_select = Some((id, 0..0));
+                smoke.phase = 16;
+            }
+            16 if self.pending_select.is_none() => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                smoke.phase = 17;
+            }
+            17 if self.documents[self.document_index].sql == CLIPBOARD_SQL => {
+                println!("System clipboard copy, editor selection, and paste passed");
+                smoke.phase = 2;
+            }
+            _ => {}
         }
         if smoke.phase == 2 {
             let ready = smoke.ready.get_or_insert_with(Instant::now);

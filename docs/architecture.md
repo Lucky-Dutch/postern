@@ -49,6 +49,15 @@ Tokio worker
 - `src/ui/app/smoke.rs`: optional native framebuffer smoke harness, absent from
   default and release builds.
 
+## Clipboard
+
+The eframe `clipboard` feature must stay enabled when selecting features manually.
+Copy buttons use `egui::Context::copy_text`, and focused text fields and grids
+handle the clipboard events translated from native shortcuts. Eframe passes the
+output to the system clipboard and reads native paste requests. Without this
+feature, egui-winit falls back to a clipboard held only in application memory,
+so copying appears to succeed but cannot be pasted into another application.
+
 ## Sessions
 
 The data lane owns the table browser's session. Each SQL document has a lane and

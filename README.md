@@ -594,7 +594,8 @@ Deep pages still pay for PostgreSQL's `OFFSET`, which reads past every earlier r
 | <kbd>⌫</kbd> | Mark the selected rows for deletion |
 
 Grid keys apply when the grid has focus; in text fields they keep their normal
-behavior. Selection belongs to the current page.
+behavior. Selection belongs to the current page. Copy buttons and Command-C use
+the system clipboard, so copied text can be pasted into other applications.
 
 <br/>
 
@@ -699,7 +700,15 @@ table, SQL, structure, server, and diagnostics views, captures only the
 application's own framebuffer, and closes each window. `scripts/demo.sql` seeds the
 synthetic data. Set `POSTERN_SMOKE_SCREENS` to a space-separated list to capture
 fewer views and `POSTERN_SMOKE_DEBUG=1` to trace the harness. It is not full mouse
-and keyboard coverage. Results and every screenshot are in
+and keyboard coverage. On macOS, the `clipboard` scenario also verifies native
+copy and paste, including a SQL editor selection with Unicode and a newline. It
+replaces the system clipboard with fixture text. Run it on its own with:
+
+```sh
+POSTERN_CAPTURE_DIR=/tmp/postern-captures POSTERN_SMOKE_SCREENS=clipboard sh scripts/test-postgres.sh
+```
+
+Results and every screenshot are in
 [docs/verification.md](docs/verification.md).
 
 <br/>
