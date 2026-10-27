@@ -76,6 +76,29 @@ tunnel are dropped on disconnect. Cancellation sends a cancel request for the
 lane's session. After each SQL command, the transaction state of that session is
 read from the data session, which never changes the observed transaction.
 
+The data session has a 30-second statement timeout, a 5-second lock timeout, and
+a 60-second idle-in-transaction timeout. SQL sessions use the profile's statement
+timeout (30 seconds by default, 0 for none) and no idle-in-transaction timeout.
+Grid saves never commit a transaction opened in the SQL editor; disconnecting or
+removing a document rolls its transaction back, and the editor reports a
+transaction lost to a reconnect. An open or aborted transaction in any SQL
+document blocks switching databases. SQL results retain at most 5,000 rows across
+all result sets, 16 MiB of cell payload, and 64 statement results; statements
+still execute in full.
+
+## Browsing
+
+Sorting sends one round trip and sorts and limits in a subquery before casting
+the page's values to text. NULL placement is left to PostgreSQL unless chosen
+explicitly (last when ascending, first when descending), so an index on the
+column serves the sort in both directions. Types without an ordering, such as
+json, sort by their text. The current page stays visible while the next loads.
+
+Tables estimated below two million rows are counted automatically on a separate
+count session, so counting never delays browsing. Larger tables show PostgreSQL's
+estimate (`≈`) and a Count button. Tab-separated copies use PostgreSQL's COPY
+text format, so pasting them back keeps NULLs and special characters.
+
 ## Values and mutations
 
 All cell values use `Option<String>`; `None` is SQL NULL. Browsing selects each
@@ -150,6 +173,16 @@ constraint definitions are user-written SQL fragments that are rejected if they
 contain a semicolon, a line comment, unbalanced parentheses, or an unterminated
 quote. The statements are shown for review and run in one transaction.
 
-The design follows the domain separation seen in SequelPG, adapted to Rust
-ownership and a message-driven egui application. No Swift, webview, or
-general-purpose application server is part of this implementation.
+## Storage
+
+Profiles, SQL drafts, display settings, and the last 100 user queries are stored
+in `~/Library/Application Support/dev.postern.Postern` with private permissions.
+Files use atomic replacement; corrupt files are reported and preserved. Saved SQL
+files and exports keep the permissions of an existing file and follow symbolic
+links. Statements that contain the word PASSWORD are never added to the history.
+
+Postern was called PG Manager before. On the first start, data saved under
+`~/Library/Application Support/dev.pgmanager.PG-Manager` is moved to the new
+directory, unless the new directory already exists. Keychain passwords move from
+the `dev.pgmanager.database` service to `dev.postern.database` when a connection
+first reads them.
