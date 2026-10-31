@@ -21,19 +21,22 @@ const COMMON_TYPES: &[&str] = &[
 
 impl PosternApp {
     pub(super) fn structure_view(&mut self, ui: &mut egui::Ui) {
-        if self.table_editor.is_some() {
+        if self.table_tabs[self.table_index].table_editor.is_some() {
             self.table_editor_ui(ui);
             return;
         }
-        let editable = self
+        let editable = self.table_tabs[self.table_index]
             .selected_relation
             .as_ref()
             .is_some_and(Relation::is_table)
-            && !self.structure.columns.is_empty();
+            && !self.table_tabs[self.table_index]
+                .structure
+                .columns
+                .is_empty();
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Frame::new().inner_margin(18).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if let Some(comment) = &self.structure.comment {
+                    if let Some(comment) = &self.table_tabs[self.table_index].structure.comment {
                         ui.label(RichText::new(comment).italics().color(theme::muted()));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -45,10 +48,10 @@ impl PosternApp {
                             .on_hover_text("Change columns, constraints, and indexes. Changes are reviewed as SQL before they run.")
                             .clicked()
                             && !self.blocked_by_edits()
-                            && let Some(relation) = &self.selected_relation
+                            && let Some(relation) = &self.table_tabs[self.table_index].selected_relation
                         {
-                            let draft = TableDraft::from_structure(relation, &self.structure);
-                            self.table_editor = Some(TableEditor {
+                            let draft = TableDraft::from_structure(relation, &self.table_tabs[self.table_index].structure);
+                            self.table_tabs[self.table_index].table_editor = Some(TableEditor {
                                 original: draft.clone(),
                                 edited: draft,
                                 creating: false,
@@ -56,7 +59,7 @@ impl PosternApp {
                         }
                     });
                 });
-                if let Some(stats) = &self.structure.stats {
+                if let Some(stats) = &self.table_tabs[self.table_index].structure.stats {
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
                         let mut fact = |label: &str, value: String| {
@@ -101,7 +104,7 @@ impl PosternApp {
                             ui.strong(title);
                         }
                         ui.end_row();
-                        for column in &self.structure.columns {
+                        for column in &self.table_tabs[self.table_index].structure.columns {
                             ui.label(&column.name);
                             ui.monospace(&column.data_type);
                             ui.label(if column.nullable { "Yes" } else { "No" });
@@ -110,8 +113,7 @@ impl PosternApp {
                             } else {
                                 ""
                             }));
-                            let foreign = self
-                                .structure
+                            let foreign = self.table_tabs[self.table_index].structure
                                 .foreign_keys
                                 .iter()
                                 .any(|key| key.columns.contains(&column.name));
@@ -134,10 +136,10 @@ impl PosternApp {
                 ui.add_space(25.0);
                 ui.heading("Constraints");
                 ui.add_space(10.0);
-                if self.structure.constraints.is_empty() {
+                if self.table_tabs[self.table_index].structure.constraints.is_empty() {
                     ui.label(RichText::new("None").color(theme::muted()));
                 }
-                for (name, definition) in &self.structure.constraints {
+                for (name, definition) in &self.table_tabs[self.table_index].structure.constraints {
                     ui.strong(name);
                     ui.monospace(definition);
                     ui.add_space(7.0);
@@ -145,10 +147,10 @@ impl PosternApp {
                 ui.add_space(25.0);
                 ui.heading("Indexes");
                 ui.add_space(10.0);
-                if self.structure.indexes.is_empty() {
+                if self.table_tabs[self.table_index].structure.indexes.is_empty() {
                     ui.label(RichText::new("None").color(theme::muted()));
                 }
-                for index in &self.structure.indexes {
+                for index in &self.table_tabs[self.table_index].structure.indexes {
                     ui.horizontal(|ui| {
                         ui.strong(&index.name);
                         let mut facts = Vec::new();
@@ -169,10 +171,10 @@ impl PosternApp {
                 ui.add_space(25.0);
                 ui.heading("Privileges");
                 ui.add_space(10.0);
-                if self.structure.privileges.is_empty() {
+                if self.table_tabs[self.table_index].structure.privileges.is_empty() {
                     ui.label(RichText::new("No grants visible to this login.").color(theme::muted()));
                 }
-                for (grantee, privileges) in &self.structure.privileges {
+                for (grantee, privileges) in &self.table_tabs[self.table_index].structure.privileges {
                     ui.horizontal(|ui| {
                         ui.strong(grantee);
                         ui.label(RichText::new(privileges).color(theme::muted()));
@@ -181,10 +183,10 @@ impl PosternApp {
                 ui.add_space(25.0);
                 ui.heading("Referenced by");
                 ui.add_space(10.0);
-                if self.structure.referenced_by.is_empty() {
+                if self.table_tabs[self.table_index].structure.referenced_by.is_empty() {
                     ui.label(RichText::new("None").color(theme::muted()));
                 }
-                for key in &self.structure.referenced_by {
+                for key in &self.table_tabs[self.table_index].structure.referenced_by {
                     ui.monospace(format!(
                         "{}.{} ({}) via {}",
                         key.schema,
@@ -198,7 +200,7 @@ impl PosternApp {
     }
 
     pub(super) fn start_new_table(&mut self, schema: String) {
-        if self.blocked_by_edits() {
+        if self.busy.control {
             return;
         }
         let draft = TableDraft {
@@ -212,16 +214,20 @@ impl PosternApp {
             }],
             ..Default::default()
         };
-        self.table_editor = Some(TableEditor {
-            original: draft.clone(),
-            edited: draft,
-            creating: true,
+        self.add_table_tab(TableTab {
+            mode: Mode::NewTable,
+            table_editor: Some(TableEditor {
+                original: draft.clone(),
+                edited: draft,
+                creating: true,
+            }),
+            ..Default::default()
         });
         self.mode = Mode::NewTable;
     }
 
     pub(super) fn table_editor_view(&mut self, ui: &mut egui::Ui) {
-        if self.table_editor.is_none() {
+        if self.table_tabs[self.table_index].table_editor.is_none() {
             self.mode = Mode::Query;
             return;
         }
@@ -239,7 +245,7 @@ impl PosternApp {
         };
         let mut cancel = false;
         let mut review = false;
-        let Some(editor) = &mut self.table_editor else {
+        let Some(editor) = &mut self.table_tabs[self.table_index].table_editor else {
             return;
         };
         let creating = editor.creating;
@@ -445,14 +451,14 @@ impl PosternApp {
             });
         });
         if cancel {
-            self.table_editor = None;
-            if creating {
-                self.mode = Mode::Query;
-            }
+            self.cancel_table_editor();
             return;
         }
         if review {
-            let editor = self.table_editor.as_ref().expect("editor is open");
+            let editor = self.table_tabs[self.table_index]
+                .table_editor
+                .as_ref()
+                .expect("editor is open");
             let edited = &editor.edited;
             let result = if editor.creating {
                 sql::create_table_sql(edited)

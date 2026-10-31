@@ -210,6 +210,12 @@ Then:
 
 - Tables, views, materialized views, foreign tables, and partitions, grouped by
   schema.
+- Open several tables in tabs. Clicking a table opens it or selects its existing
+  tab. Each tab keeps its rows, filters, sort order, page, selection, structure
+  draft, and pending edits while you switch, including during a load or save.
+- Close a table with its × button or ⌘W. Closing a tab with pending changes asks
+  before discarding them. Changing connections or databases requires saving or
+  discarding changes in every tab. Table tabs last until you disconnect or quit.
 - 25 to 500 rows per page. Sort by one or more columns (Option-click a header).
 - Filter with several conditions or your own SQL expression. Right-click a value
   to filter by it.
@@ -332,7 +338,7 @@ earlier rows.
 | <kbd>⌘</kbd> <kbd>O</kbd> | Open a SQL file |
 | <kbd>⌘</kbd> <kbd>S</kbd> | Save the SQL file, or save table changes |
 | <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>S</kbd> | Save the SQL document to a new file |
-| <kbd>⌘</kbd> <kbd>W</kbd> | Remove the current SQL document; asks first if it has SQL |
+| <kbd>⌘</kbd> <kbd>W</kbd> | Close the current table tab (asks about pending changes), or remove the current SQL document (asks if it has SQL) |
 | <kbd>⌘</kbd> <kbd>F</kbd> · <kbd>⌘</kbd> <kbd>G</kbd> · <kbd>⌘</kbd> <kbd>⇧</kbd> <kbd>G</kbd> | Find, next match, previous match |
 | <kbd>⌃</kbd> <kbd>F</kbd> | Format SQL |
 | <kbd>⌃</kbd> <kbd>Space</kbd> | Show completions |

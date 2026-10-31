@@ -6,6 +6,7 @@ enum DialogOutcome {
     None,
     Stage(usize, usize, Option<String>),
     RemoveDocument(Uuid),
+    CloseTable(Uuid),
     Import,
     Quit,
     /// Statements to run, whether they share a transaction, a description, the
@@ -178,6 +179,17 @@ impl PosternApp {
                             }
                         });
                     }
+                    Dialog::CloseTable(id) => {
+                        ui.heading("Close table with unsaved changes?");
+                        ui.label("Closing this tab discards its pending row and structure changes.");
+                        ui.horizontal(|ui| {
+                            if ui.button("Cancel").clicked() { close = true; }
+                            if danger(ui, "Discard and close", !self.busy.control && !(self.busy.data && self.data_tab == Some(*id))) {
+                                outcome = DialogOutcome::CloseTable(*id);
+                                close = true;
+                            }
+                        });
+                    }
                     Dialog::RemoveDocument(id) => {
                         let document = self.documents.iter().find(|d| d.id == *id);
                         let title = document.map_or("Query", |d| d.title.as_str());
@@ -259,7 +271,7 @@ impl PosternApp {
                                         })
                                         .show_ui(ui, |ui| {
                                             for column in
-                                                self.structure.columns.iter().filter(|c| !c.generated)
+                                                self.table_tabs[self.table_index].structure.columns.iter().filter(|c| !c.generated)
                                             {
                                                 ui.selectable_value(
                                                     selected,
@@ -603,11 +615,8 @@ impl PosternApp {
                         });
                     }
                     Dialog::QuitWithChanges => {
-                        ui.heading("Discard unsaved changes?");
-                        ui.label(format!(
-                            "{} changes in the table browser have not been saved.",
-                            self.edits.len()
-                        ));
+                        ui.heading("Quit with unsaved table changes?");
+                        ui.label("Pending row and structure changes in all open table tabs will be discarded.");
                         ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             if ui.button("Cancel").clicked() {
@@ -633,10 +642,12 @@ impl PosternApp {
             match outcome {
                 DialogOutcome::None => {}
                 DialogOutcome::Stage(row, column, value) => {
-                    self.edits
-                        .set(&self.table_page.result.rows, row, column, value);
+                    let tab = &mut self.table_tabs[self.table_index];
+                    tab.edits
+                        .set(&tab.table_page.result.rows, row, column, value);
                 }
                 DialogOutcome::RemoveDocument(id) => self.remove_document(id),
+                DialogOutcome::CloseTable(id) => self.close_table(id),
                 DialogOutcome::Import => {
                     if let Dialog::ImportCsv(draft) = &dialog {
                         match self.start_csv_import(draft) {

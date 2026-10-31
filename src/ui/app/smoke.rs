@@ -98,7 +98,11 @@ impl PosternApp {
                 self.busy.any(),
                 self.status,
                 self.warning,
-                self.table_page.result.rows.len()
+                self.table_tabs[self.table_index]
+                    .table_page
+                    .result
+                    .rows
+                    .len()
             );
         }
         if smoke.phase == 0 && smoke.screen == "discovery" && !self.busy.any() {
@@ -216,11 +220,29 @@ impl PosternApp {
             }
             smoke.phase = 1;
         } else if smoke.phase == 1 && !self.busy.any() {
+            if smoke.screen.starts_with("tabs") {
+                let tab = &mut self.table_tabs[self.table_index];
+                tab.sort = vec![SortColumn {
+                    name: "price".into(),
+                    descending: true,
+                }];
+                tab.page_size = 25;
+                tab.show_filter = true;
+                tab.filter = FilterSet::single(Filter {
+                    column: "category".into(),
+                    operator: FilterOperator::Equal,
+                    value: "Coffee".into(),
+                });
+                self.apply_filter(self.table_tabs[self.table_index].filter.clone());
+                smoke.phase = 20;
+                self.smoke = Some(smoke);
+                return;
+            }
             if smoke.screen.starts_with("unicode") {
                 let result = if smoke.screen == "unicode_query" {
                     &self.query_outputs[&self.documents[0].id].results[0]
                 } else {
-                    &self.table_page.result
+                    &self.table_tabs[self.table_index].table_page.result
                 };
                 let values: Vec<_> = result
                     .rows
@@ -249,7 +271,10 @@ impl PosternApp {
                 });
             }
             if smoke.screen == "databases" {
-                self.content.selection.click(1, false);
+                self.table_tabs[self.table_index]
+                    .content
+                    .selection
+                    .click(1, false);
                 self.documents[0].sql =
                     "SELECT 'keep this draft after switching databases';".into();
                 self.send(
@@ -261,8 +286,14 @@ impl PosternApp {
                 return;
             }
             if matches!(smoke.screen.as_str(), "selection" | "delete") {
-                self.content.selection.click(1, false);
-                self.content.selection.click(5, true);
+                self.table_tabs[self.table_index]
+                    .content
+                    .selection
+                    .click(1, false);
+                self.table_tabs[self.table_index]
+                    .content
+                    .selection
+                    .click(5, true);
                 if smoke.screen == "delete" {
                     self.stage_delete();
                 }
@@ -273,15 +304,22 @@ impl PosternApp {
             if smoke.screen == "ddl" {
                 self.mode = Mode::Definition;
                 assert!(
-                    self.structure
+                    self.table_tabs[self.table_index]
+                        .structure
                         .definition
                         .contains("GENERATED ALWAYS AS IDENTITY")
                 );
             }
             if smoke.screen == "structure_edit" {
                 self.mode = Mode::Structure;
-                let relation = self.selected_relation.clone().unwrap();
-                let original = TableDraft::from_structure(&relation, &self.structure);
+                let relation = self.table_tabs[self.table_index]
+                    .selected_relation
+                    .clone()
+                    .unwrap();
+                let original = TableDraft::from_structure(
+                    &relation,
+                    &self.table_tabs[self.table_index].structure,
+                );
                 let mut edited = original.clone();
                 edited.columns[1].name = "title".into();
                 edited.columns.push(ColumnDraft {
@@ -293,28 +331,46 @@ impl PosternApp {
                 });
                 let statements = sql::alter_table_sql(&original, &edited).unwrap();
                 assert_eq!(statements.len(), 3);
-                self.table_editor = Some(TableEditor {
+                self.table_tabs[self.table_index].table_editor = Some(TableEditor {
                     original,
                     edited,
                     creating: false,
                 });
             }
             if smoke.screen == "staged" {
-                let rows = self.table_page.result.rows.clone();
+                let rows = self.table_tabs[self.table_index]
+                    .table_page
+                    .result
+                    .rows
+                    .clone();
                 let loaded = rows.len();
-                self.edits
-                    .set(&rows, 0, 1, Some("Ceramic pour-over (v2)".into()));
-                self.edits.set(&rows, 1, 3, Some("19.00".into()));
-                let index = self.edits.add_row(self.structure.columns.len());
+                self.table_tabs[self.table_index].edits.set(
+                    &rows,
+                    0,
+                    1,
+                    Some("Ceramic pour-over (v2)".into()),
+                );
+                self.table_tabs[self.table_index]
+                    .edits
+                    .set(&rows, 1, 3, Some("19.00".into()));
+                let tab = &mut self.table_tabs[self.table_index];
+                let index = tab.edits.add_row(tab.structure.columns.len());
                 for (column, value) in [(1, "Travel mug"), (2, "Coffee"), (3, "27.00")] {
-                    self.edits
-                        .set(&rows, loaded + index, column, Some(value.into()));
+                    self.table_tabs[self.table_index].edits.set(
+                        &rows,
+                        loaded + index,
+                        column,
+                        Some(value.into()),
+                    );
                 }
-                self.edits.delete(loaded, [3]);
-                assert_eq!(self.edits.len(), 4);
-                self.show_details = true;
-                self.content.selection.click(0, false);
-                self.content.cell = Some((0, 1));
+                self.table_tabs[self.table_index].edits.delete(loaded, [3]);
+                assert_eq!(self.table_tabs[self.table_index].edits.len(), 4);
+                self.table_tabs[self.table_index].show_details = true;
+                self.table_tabs[self.table_index]
+                    .content
+                    .selection
+                    .click(0, false);
+                self.table_tabs[self.table_index].content.cell = Some((0, 1));
             }
             if smoke.screen == "filter" {
                 let filter = FilterSet {
@@ -332,8 +388,8 @@ impl PosternApp {
                     ],
                     ..Default::default()
                 };
-                self.filter = filter.clone();
-                self.show_filter = true;
+                self.table_tabs[self.table_index].filter = filter.clone();
+                self.table_tabs[self.table_index].show_filter = true;
                 self.apply_filter(filter);
                 smoke.phase = 6;
                 self.smoke = Some(smoke);
@@ -346,7 +402,9 @@ impl PosternApp {
                     .find(|r| r.name == "customers")
                     .unwrap()
                     .clone();
-                let customer = self.table_page.result.rows[1][1].clone().unwrap();
+                let customer = self.table_tabs[self.table_index].table_page.result.rows[1][1]
+                    .clone()
+                    .unwrap();
                 self.open_related(
                     customers,
                     FilterSet::single(Filter {
@@ -361,11 +419,12 @@ impl PosternApp {
             }
             if matches!(smoke.screen.as_str(), "edit" | "unicode_edit") {
                 let column = if smoke.screen == "unicode_edit" { 2 } else { 1 };
-                let values = self.table_page.result.rows[0].clone();
+                let values = self.table_tabs[self.table_index].table_page.result.rows[0].clone();
                 self.dialog = Some(Dialog::Cell {
                     row: 0,
                     column,
-                    name: self.table_page.result.columns[column].clone(),
+                    name: self.table_tabs[self.table_index].table_page.result.columns[column]
+                        .clone(),
                     value: values[column].clone().unwrap(),
                     null: false,
                     editable: true,
@@ -375,8 +434,17 @@ impl PosternApp {
             smoke.phase = 2;
         } else if smoke.phase == 4 && !self.busy.any() {
             assert_eq!(self.connected.as_ref().unwrap().database, "analytics");
-            assert!(self.content.selection.is_empty());
-            assert!(self.selected_relation.is_none());
+            assert!(
+                self.table_tabs[self.table_index]
+                    .content
+                    .selection
+                    .is_empty()
+            );
+            assert!(
+                self.table_tabs[self.table_index]
+                    .selected_relation
+                    .is_none()
+            );
             assert!(self.query_outputs.is_empty());
             assert_eq!(
                 self.documents[0].sql,
@@ -391,11 +459,22 @@ impl PosternApp {
             self.select_relation(relation);
             smoke.phase = 5;
         } else if smoke.phase == 5 && !self.busy.any() {
-            assert_eq!(self.table_page.result.rows.len(), 3);
+            assert_eq!(
+                self.table_tabs[self.table_index]
+                    .table_page
+                    .result
+                    .rows
+                    .len(),
+                3
+            );
             smoke.phase = 2;
         } else if smoke.phase == 6 && !self.busy.any() {
             assert_eq!(
-                self.table_page.result.rows.len(),
+                self.table_tabs[self.table_index]
+                    .table_page
+                    .result
+                    .rows
+                    .len(),
                 3,
                 "Coffee items above 30"
             );
@@ -553,10 +632,27 @@ impl PosternApp {
             );
             smoke.phase = 2;
         } else if smoke.phase == 7 && !self.busy.any() {
-            assert_eq!(self.selected_relation.as_ref().unwrap().name, "customers");
-            assert_eq!(self.table_page.result.rows.len(), 1);
-            assert_eq!(self.back_stack.len(), 1);
+            assert_eq!(
+                self.table_tabs[self.table_index]
+                    .selected_relation
+                    .as_ref()
+                    .unwrap()
+                    .name,
+                "customers"
+            );
+            assert_eq!(
+                self.table_tabs[self.table_index]
+                    .table_page
+                    .result
+                    .rows
+                    .len(),
+                1
+            );
+            assert_eq!(self.table_tabs[self.table_index].back_stack.len(), 1);
             smoke.phase = 2;
+        }
+        if smoke.screen.starts_with("tabs") && !self.busy.any() {
+            self.tick_table_tabs_smoke(&mut smoke);
         }
         #[cfg(target_os = "macos")]
         match smoke.phase {
@@ -611,6 +707,116 @@ impl PosternApp {
             }
         }
         self.smoke = Some(smoke);
+    }
+
+    fn tick_table_tabs_smoke(&mut self, smoke: &mut Smoke) {
+        match smoke.phase {
+            20 => {
+                let tab = &mut self.table_tabs[0];
+                assert_eq!(tab.table_page.result.rows.len(), 4);
+                assert_eq!(
+                    tab.table_page.result.rows[0][1].as_deref(),
+                    Some("Coffee scale")
+                );
+                tab.edits.set(
+                    &tab.table_page.result.rows,
+                    0,
+                    1,
+                    Some("Tabs smoke item".into()),
+                );
+                tab.content.selection.click(0, false);
+                let customers = self
+                    .relations
+                    .iter()
+                    .find(|r| r.name == "customers")
+                    .unwrap()
+                    .clone();
+                self.select_relation(customers);
+                assert_eq!(self.table_tabs.len(), 2);
+                self.select_table_tab(0);
+                assert!(self.busy.data, "The other tab is still loading");
+                smoke.phase = 21;
+            }
+            21 => {
+                assert_eq!(self.table_index, 0);
+                assert_eq!(self.table_tabs[1].table_page.result.rows.len(), 2);
+                assert_eq!(
+                    self.table_tabs[1].table_page.result.columns,
+                    ["id", "name", "email"]
+                );
+                assert!(self.table_tabs[0].content.selection.contains(0));
+                assert_eq!(self.table_tabs[0].page_size, 25);
+                self.save_changes();
+                self.select_table_tab(1);
+                smoke.phase = 22;
+            }
+            22 => {
+                assert_eq!(self.table_index, 1);
+                assert!(self.table_tabs[0].edits.is_empty());
+                assert_eq!(
+                    self.table_tabs[0].table_page.result.rows[0][1].as_deref(),
+                    Some("Tabs smoke item")
+                );
+                assert_eq!(
+                    self.table_tabs[1].table_page.result.rows[0][1].as_deref(),
+                    Some("Ada Lovelace")
+                );
+                self.select_table_tab(0);
+                let tab = &mut self.table_tabs[0];
+                tab.edits.set(
+                    &tab.table_page.result.rows,
+                    0,
+                    1,
+                    Some("Coffee scale".into()),
+                );
+                self.save_changes();
+                self.select_table_tab(1);
+                smoke.phase = 23;
+            }
+            23 => {
+                assert_eq!(
+                    self.table_tabs[0].table_page.result.rows[0][1].as_deref(),
+                    Some("Coffee scale")
+                );
+                let orders = self
+                    .relations
+                    .iter()
+                    .find(|r| r.name == "orders")
+                    .unwrap()
+                    .clone();
+                self.select_relation(orders);
+                self.select_table_tab(0);
+                smoke.phase = 24;
+            }
+            24 => {
+                let tab = &mut self.table_tabs[0];
+                tab.edits.set(
+                    &tab.table_page.result.rows,
+                    0,
+                    1,
+                    Some("Coffee scale (revised)".into()),
+                );
+                let id = tab.id;
+                self.request_close_table(id);
+                assert!(matches!(self.dialog, Some(Dialog::CloseTable(owner)) if owner == id));
+                self.dialog = None;
+                let orders = self.table_tabs[2].id;
+                self.close_table(orders);
+                assert_eq!(self.table_tabs.len(), 2);
+                assert_eq!(self.table_index, 0);
+                self.select_table_tab(1);
+                assert!(!self.send(
+                    Command::SwitchDatabase("analytics".into()),
+                    "Switching database..."
+                ));
+                self.select_table_tab(0);
+                println!(
+                    "Table tabs preserved filters, sorting, selection and edits; background load/save routing and close protection passed"
+                );
+                smoke.phase = 2;
+            }
+            _ => {}
+        }
     }
 
     pub(super) fn open_smoke_combo(smoke: Option<&Smoke>, ui: &egui::Ui, id: &str, screen: &str) {

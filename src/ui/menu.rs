@@ -42,7 +42,7 @@ impl NativeMenu {
         );
         let save = item("Save", Action::Save, key(command, Code::KeyS));
         let save_as = item("Save As...", Action::SaveAs, key(command_shift, Code::KeyS));
-        let close = item("Close Query", Action::CloseQuery, key(command, Code::KeyW));
+        let close = item("Close Tab", Action::CloseQuery, key(command, Code::KeyW));
         let find = item("Find...", Action::Find, key(command, Code::KeyF));
         let find_next = item("Find Next", Action::FindNext, key(command, Code::KeyG));
         let find_previous = item(

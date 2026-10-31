@@ -23,7 +23,8 @@ impl PosternApp {
                 } else if self.mode == Mode::Query {
                     &self.documents[self.document_index].title
                 } else {
-                    self.selected_relation
+                    self.table_tabs[self.table_index]
+                        .selected_relation
                         .as_ref()
                         .map(|r| r.name.as_str())
                         .unwrap_or("Workspace")

@@ -30,7 +30,7 @@ if [ -n "${POSTERN_CAPTURE_DIR:-}" ]; then
   mkdir -p "$POSTERN_CAPTURE_DIR"
   "$PG_BIN/psql" -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$POSTERN_TEST_PORT" -U postern_test -d postgres -f scripts/demo.sql
   "$CARGO" build --locked --features smoke
-  screens=${POSTERN_SMOKE_SCREENS:-servers table query structure edit selection delete discovery databases unicode unicode_query unicode_edit staged filter related structure_edit routine ddl completion find table_light query_light activity roles explain advisor slow_queries generic_plan clipboard statements_setup statements_restart}
+  screens=${POSTERN_SMOKE_SCREENS:-servers table tabs tabs_light query structure edit selection delete discovery databases unicode unicode_query unicode_edit staged filter related structure_edit routine ddl completion find table_light query_light activity roles explain advisor slow_queries generic_plan clipboard statements_setup statements_restart}
   setup_screens=
   for screen in $screens; do
     case $screen in

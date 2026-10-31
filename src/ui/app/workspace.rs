@@ -22,14 +22,27 @@ impl PosternApp {
             .show(ui, |ui| self.navigator(ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::background()))
-            .show(ui, |ui| match self.mode {
-                Mode::Query => self.query_workspace(ui),
-                Mode::Routine => self.routine_view(ui),
-                Mode::NewTable => self.table_editor_view(ui),
-                Mode::Activity => self.activity_view(ui),
-                Mode::Roles => self.roles_view(ui),
-                Mode::Diagnostics => self.diagnostics_view(ui),
-                Mode::Content | Mode::Structure | Mode::Definition => self.table_workspace(ui),
+            .show(ui, |ui| {
+                self.table_tabs_bar(ui);
+                match self.mode {
+                    Mode::Query => self.query_workspace(ui),
+                    Mode::Routine => self.routine_view(ui),
+                    Mode::Activity => self.activity_view(ui),
+                    Mode::Roles => self.roles_view(ui),
+                    Mode::Diagnostics => self.diagnostics_view(ui),
+                    Mode::Content | Mode::Structure | Mode::Definition | Mode::NewTable => {
+                        let id = self.table_tabs[self.table_index].id;
+                        ui.push_id(id, |ui| {
+                            ui.add_enabled_ui(self.ddl_tab != Some(id), |ui| {
+                                if self.mode == Mode::NewTable {
+                                    self.table_editor_view(ui);
+                                } else {
+                                    self.table_workspace(ui);
+                                }
+                            });
+                        });
+                    }
+                }
             });
     }
 

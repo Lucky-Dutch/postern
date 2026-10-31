@@ -1,5 +1,30 @@
 # Verification
 
+## Table tabs, 2026-10-31
+
+Verified with Rust 1.99.1 and disposable PostgreSQL 19rc1 clusters on macOS.
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`: passed.
+- `cargo test --locked`: all 65 unit tests passed. Eleven new tab tests cover
+  independent browsing state and edits, schema-qualified tab reuse, background
+  page/count/error/save routing, stale responses after closing and reopening,
+  close confirmation, connection-change guards for inactive edits, catalog
+  refresh, independent structure drafts, and returning from the structure editor.
+- `scripts/test-postgres.sh`: all 13 database integration tests passed.
+- Native smoke scenarios `tabs`, `tabs_light`, `table`, `table_light`,
+  `structure`, `structure_edit`, `related`, `filter`, `staged`, `databases`, and
+  `query`: passed. The tab scenarios exercise a background load, preserve filters,
+  sorting and selection, save a staged edit while another table is selected,
+  restore the fixture value, close a clean tab, and check dirty-tab confirmation
+  and a blocked database switch. The dark and light tab captures were visually
+  inspected: [dark tabs](screenshots/tabs.png), [light tabs](screenshots/tabs_light.png).
+
+The native harness drives application state and captures the real framebuffer.
+It does not automate physical tab clicks or keyboard shortcuts. Table tabs are
+kept only for the current connection and database; restoring them after quitting
+is not implemented. Existing databases were not used.
+
 ## Clipboard regression, 2026-10-26
 
 Verified on macOS 26.4.1, Apple Silicon, Rust 1.99.1, and disposable PostgreSQL

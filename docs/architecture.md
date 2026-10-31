@@ -88,6 +88,23 @@ still execute in full.
 
 ## Browsing
 
+`src/ui/app/tabs.rs` owns each table tab's metadata, rows, pagination, filters,
+sorting, counts, grid selection and inline editor, staged changes, structure
+draft, and foreign key Back history. Tabs have stable UUIDs; the selected index
+only chooses which state the UI renders. Opening a table from the sidebar reuses
+a tab with the same schema and name, or adds one. Foreign key navigation stays
+within its tab. Tab state is kept in memory for the current connection and
+database, and is cleared on disconnect or a successful connection change.
+
+The table tabs share the existing data session. Loads wait for the data lane,
+with the selected tab loaded first. Users can switch tabs while a command runs.
+The UI records the requesting tab's UUID for data and count operations and routes
+completion, refresh after save/import, and errors to that tab. Late counts from a
+closed tab are ignored, including after reopening the same relation. Each tab
+has its own egui widget scope for scroll and editor state. Closing a tab with
+pending edits requires confirmation; a running data operation must finish first.
+Connection changes and quitting check pending changes across all tabs.
+
 Sorting sends one round trip and sorts and limits in a subquery before casting
 the page's values to text. NULL placement is left to PostgreSQL unless chosen
 explicitly (last when ascending, first when descending), so an index on the

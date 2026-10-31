@@ -27,6 +27,8 @@ mod servers;
 mod smoke;
 mod structure;
 mod table;
+mod tabs;
+use tabs::TableTab;
 mod workspace;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -132,6 +134,7 @@ enum Dialog {
     },
     ImportUrl(String),
     RemoveDocument(Uuid),
+    CloseTable(Uuid),
     ImportCsv(CsvDraft),
     /// Closing the window with unsaved grid changes.
     QuitWithChanges,
@@ -216,7 +219,6 @@ pub struct PosternApp {
     routine_definition: Option<String>,
     /// Open the selected routine's definition in the SQL editor once it loads.
     open_routine_in_editor: bool,
-    table_editor: Option<TableEditor>,
     activity: Vec<SessionActivity>,
     activity_auto: bool,
     activity_refreshed: Instant,
@@ -229,35 +231,16 @@ pub struct PosternApp {
     plans: HashMap<Uuid, crate::ui::explain::Plan>,
     /// A relation to open once the object list has been refreshed after DDL.
     reopen_after_catalog: Option<(String, String)>,
+    ddl_tab: Option<Uuid>,
     refresh_databases_after_ddl: bool,
     relation_search: String,
-    selected_relation: Option<Relation>,
-    structure: TableStructure,
-    table_page: TablePage,
-    page: usize,
-    pending_page: usize,
-    page_size: usize,
-    sort: Vec<SortColumn>,
-    nulls: NullsOrder,
-    /// A page request is running; the previous rows stay visible but inactive.
-    loading_rows: bool,
-    /// The filter being edited and the filter applied to the current rows.
-    filter: FilterSet,
-    applied_filter: FilterSet,
-    show_filter: bool,
-    row_count: Option<i64>,
-    /// A row count is needed for the current table and filter; set while a stale
-    /// count is being cancelled.
-    count_wanted: bool,
-    /// Grid state and staged changes of the table browser.
-    content: grid::GridState,
-    edits: PendingEdits,
+    table_tabs: Vec<TableTab>,
+    table_index: usize,
+    /// Stable owners of the operations on the shared data and count lanes.
+    data_tab: Option<Uuid>,
+    count_tab: Option<Uuid>,
     ui_state: UiState,
     ui_state_writable: bool,
-    binary: BinaryDisplay,
-    show_details: bool,
-    /// Tables visited through foreign keys, for Back.
-    back_stack: Vec<BrowseRequest>,
     allow_close: bool,
     mode: Mode,
     documents: Vec<QueryDocument>,
@@ -308,10 +291,22 @@ pub struct PosternApp {
 impl PosternApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
         theme::apply(&cc.egui_ctx);
-        let context = cc.egui_ctx.clone();
+        #[allow(unused_mut)]
+        let mut app = Self::from_context(&cc.egui_ctx, Store::open())?;
+        #[cfg(target_os = "macos")]
+        {
+            app.menu = super::menu::NativeMenu::install(&cc.egui_ctx);
+        }
+        #[cfg(feature = "smoke")]
+        app.init_smoke();
+        Ok(app)
+    }
+
+    fn from_context(ctx: &egui::Context, store_result: Result<Store>) -> Result<Self> {
+        let context = ctx.clone();
         let worker = Worker::start(move || context.request_repaint())?;
         let mut errors = Vec::new();
-        let store = match Store::open() {
+        let store = match store_result {
             Ok(store) => Some(store),
             Err(error) => {
                 errors.push(error.to_string());
@@ -359,8 +354,7 @@ impl PosternApp {
             documents.push(QueryDocument::default());
         }
         let draft = profiles.first().cloned().unwrap_or_default();
-        #[allow(unused_mut)]
-        let mut app = Self {
+        let app = Self {
             #[cfg(feature = "smoke")]
             smoke: None,
             worker,
@@ -382,7 +376,6 @@ impl PosternApp {
             selected_routine: None,
             routine_definition: None,
             open_routine_in_editor: false,
-            table_editor: None,
             activity: Vec::new(),
             activity_auto: false,
             activity_refreshed: Instant::now(),
@@ -393,29 +386,15 @@ impl PosternApp {
             slow_request: SlowQueryRequest::default(),
             plans: HashMap::new(),
             reopen_after_catalog: None,
+            ddl_tab: None,
             refresh_databases_after_ddl: false,
             relation_search: String::new(),
-            selected_relation: None,
-            structure: TableStructure::default(),
-            table_page: TablePage::default(),
-            page: 0,
-            pending_page: 0,
-            page_size: 100,
-            sort: vec![],
-            nulls: NullsOrder::Default,
-            loading_rows: false,
-            filter: FilterSet::default(),
-            applied_filter: FilterSet::default(),
-            show_filter: false,
-            row_count: None,
-            count_wanted: false,
-            content: grid::GridState::default(),
-            edits: PendingEdits::default(),
+            table_tabs: vec![TableTab::default()],
+            table_index: 0,
+            data_tab: None,
+            count_tab: None,
             ui_state,
             ui_state_writable,
-            binary: BinaryDisplay::default(),
-            show_details: false,
-            back_stack: Vec::new(),
             allow_close: false,
             mode: Mode::Query,
             documents,
@@ -436,8 +415,8 @@ impl PosternApp {
             find: None,
             pending_find_step: None,
             #[cfg(target_os = "macos")]
-            menu: super::menu::NativeMenu::install(&cc.egui_ctx),
-            logo: theme::logo(&cc.egui_ctx),
+            menu: None,
+            logo: theme::logo(ctx),
             file_states: HashMap::new(),
             file_conflicts: BTreeSet::new(),
             last_file_check: Instant::now() - Duration::from_secs(10),
@@ -455,8 +434,6 @@ impl PosternApp {
             },
             dialog: None,
         };
-        #[cfg(feature = "smoke")]
-        app.init_smoke();
         Ok(app)
     }
 
@@ -473,13 +450,35 @@ impl PosternApp {
 
     /// Sends a command when its lane is free, without touching the status line.
     fn dispatch(&mut self, command: Command) -> bool {
+        if matches!(
+            &command,
+            Command::Connect(..) | Command::SwitchDatabase(_) | Command::Disconnect
+        ) && self.blocked_by_any_edits()
+        {
+            return false;
+        }
         let lane = command.lane();
         if self.busy.blocks(lane) {
             return false;
         }
+        let table_command = matches!(
+            &command,
+            Command::Load(..)
+                | Command::Reload(_)
+                | Command::Browse(_)
+                | Command::ApplyChanges(..)
+                | Command::ImportCsv(_)
+        );
+        let count_command = matches!(&command, Command::Count(_));
         match self.worker.send(command) {
             Ok(()) => {
                 self.busy.set(lane, true);
+                if lane == Lane::Data {
+                    self.data_tab = table_command.then_some(self.table_tabs[self.table_index].id);
+                }
+                if count_command {
+                    self.count_tab = Some(self.table_tabs[self.table_index].id);
+                }
                 true
             }
             Err(error) => {
@@ -494,10 +493,15 @@ impl PosternApp {
     /// estimated below `AUTO_COUNT_LIMIT` rows; `manual` counts any table.
     fn request_count(&mut self, manual: bool) {
         const AUTO_COUNT_LIMIT: i64 = 2_000_000;
-        let Some(relation) = &self.selected_relation else {
+        let Some(relation) = &self.table_tabs[self.table_index].selected_relation else {
             return;
         };
-        if self.structure.columns.is_empty() || (!manual && self.row_count.is_some()) {
+        if self.table_tabs[self.table_index]
+            .structure
+            .columns
+            .is_empty()
+            || (!manual && self.table_tabs[self.table_index].row_count.is_some())
+        {
             return;
         }
         let estimate = self
@@ -509,11 +513,10 @@ impl PosternApp {
             return;
         }
         if self.busy.blocks(Lane::Sql(COUNT_SESSION)) {
-            self.count_wanted = true;
-            self.worker.cancel_lane(Lane::Sql(COUNT_SESSION));
+            self.table_tabs[self.table_index].count_wanted = true;
             return;
         }
-        self.count_wanted = false;
+        self.table_tabs[self.table_index].count_wanted = false;
         if let Some(request) = self.browse_request(0) {
             self.dispatch(Command::Count(request));
         }
@@ -522,13 +525,27 @@ impl PosternApp {
     /// After a page arrives: the last page gives the exact total for free;
     /// otherwise the total is counted.
     fn update_row_count(&mut self) {
-        if !self.table_page.has_more && !self.table_page.result.columns.is_empty() {
-            let total = self.page * self.page_size + self.table_page.result.rows.len();
-            self.row_count = Some(total as i64);
-            if self.busy.blocks(Lane::Sql(COUNT_SESSION)) {
+        if !self.table_tabs[self.table_index].table_page.has_more
+            && !self.table_tabs[self.table_index]
+                .table_page
+                .result
+                .columns
+                .is_empty()
+        {
+            let total = self.table_tabs[self.table_index].page
+                * self.table_tabs[self.table_index].page_size
+                + self.table_tabs[self.table_index]
+                    .table_page
+                    .result
+                    .rows
+                    .len();
+            self.table_tabs[self.table_index].row_count = Some(total as i64);
+            if self.count_tab == Some(self.table_tabs[self.table_index].id)
+                && self.busy.blocks(Lane::Sql(COUNT_SESSION))
+            {
                 self.worker.cancel_lane(Lane::Sql(COUNT_SESSION));
             }
-            self.count_wanted = false;
+            self.table_tabs[self.table_index].count_wanted = false;
         } else {
             self.request_count(false);
         }
@@ -536,333 +553,361 @@ impl PosternApp {
 
     fn receive(&mut self) {
         while let Some((lane, event)) = self.worker.poll_lane() {
-            if event.finishes() {
-                self.busy.set(lane, false);
+            self.handle_event(lane, event);
+        }
+        self.load_waiting_table();
+        self.count_waiting_table();
+    }
+
+    fn handle_event(&mut self, lane: Lane, event: Event) {
+        if event.finishes() {
+            self.busy.set(lane, false);
+        }
+        let table_event = matches!(
+            &event,
+            Event::Loaded(..)
+                | Event::Reloaded(..)
+                | Event::Page(..)
+                | Event::Mutated
+                | Event::Imported(_)
+                | Event::Counted(..)
+        ) || matches!(&event, Event::Error(_))
+            && (lane == Lane::Data || lane == Lane::Sql(COUNT_SESSION));
+        let visible = self.table_tabs[self.table_index].id;
+        if table_event {
+            // Table handlers and their follow-up commands use table_index.
+            // Restore the visible tab after handling the event synchronously.
+            let owner = if lane == Lane::Sql(COUNT_SESSION) {
+                self.count_tab
+            } else {
+                self.data_tab
+            };
+            if let Some(owner) = owner {
+                let Some(index) = self.table_tabs.iter().position(|tab| tab.id == owner) else {
+                    return;
+                };
+                self.table_index = index;
+            } else if !matches!(&event, Event::Error(_)) {
+                return;
             }
-            match event {
-                Event::Connected(profile, relations) => {
-                    self.completion_catalog.relations = relations
-                        .iter()
-                        .map(|r| (r.schema.clone(), r.name.clone()))
-                        .collect();
-                    self.content.clear();
-                    self.edits.clear();
-                    self.back_stack.clear();
-                    self.connected = Some(profile);
-                    self.relations = relations;
-                    self.servers_visible = false;
-                    self.selected_relation = None;
-                    self.table_page = TablePage::default();
-                    self.structure = TableStructure::default();
-                    self.query_outputs.clear();
-                    self.editor_selection = 0..0;
-                    self.sort.clear();
-                    self.applied_filter = FilterSet::default();
-                    self.filter = FilterSet::default();
-                    self.show_filter = false;
-                    self.row_count = None;
-                    self.page = 0;
-                    self.dialog = None;
-                    self.databases.clear();
-                    self.transaction.clear();
-                    self.running.clear();
-                    self.index_report = None;
-                    self.slow_queries = None;
-                    self.mode = Mode::Query;
-                    self.status = "Connected".into();
-                    self.send(Command::Databases, "Loading databases...");
+        }
+        match event {
+            Event::Connected(profile, relations) => {
+                self.clear_table_tabs();
+                self.completion_catalog.relations = relations
+                    .iter()
+                    .map(|r| (r.schema.clone(), r.name.clone()))
+                    .collect();
+                self.connected = Some(profile);
+                self.relations = relations;
+                self.servers_visible = false;
+                self.query_outputs.clear();
+                self.editor_selection = 0..0;
+                self.dialog = None;
+                self.databases.clear();
+                self.transaction.clear();
+                self.running.clear();
+                self.index_report = None;
+                self.slow_queries = None;
+                self.mode = Mode::Query;
+                self.status = "Connected".into();
+                self.send(Command::Databases, "Loading databases...");
+            }
+            Event::DiscoveredDatabases(profile, databases) => {
+                if profile == self.draft {
+                    self.status = format!(
+                        "Found {} databases. Choose one in Connection details.",
+                        databases.len()
+                    );
+                    self.discovered_databases = Some(databases);
                 }
-                Event::DiscoveredDatabases(profile, databases) => {
-                    if profile == self.draft {
-                        self.status = format!(
-                            "Found {} databases. Choose one in Connection details.",
-                            databases.len()
-                        );
-                        self.discovered_databases = Some(databases);
-                    }
-                }
-                Event::Databases(databases) => {
-                    self.status = format!("{} databases available", databases.len());
-                    self.databases = databases;
-                }
-                Event::Tested => self.status = "Connection test succeeded".into(),
-                Event::Disconnected => {
-                    self.content.clear();
-                    self.edits.clear();
-                    self.back_stack.clear();
-                    self.connected = None;
-                    self.databases.clear();
-                    self.relations.clear();
-                    self.query_outputs.clear();
-                    self.table_page = TablePage::default();
-                    self.structure = TableStructure::default();
-                    self.selected_relation = None;
-                    self.servers_visible = true;
-                    self.transaction.clear();
-                    self.running.clear();
-                    self.status = "Disconnected".into();
-                }
-                Event::Catalog(relations) => {
-                    self.completion_catalog.relations = relations
-                        .iter()
-                        .map(|r| (r.schema.clone(), r.name.clone()))
-                        .collect();
-                    self.relations = relations;
-                    self.status = "Object list refreshed".into();
-                    if let Some((schema, name)) = self.reopen_after_catalog.take() {
-                        if let Some(relation) = self
-                            .relations
-                            .iter()
-                            .find(|r| r.schema == schema && r.name == name)
-                            .cloned()
-                        {
-                            let mode = self.mode;
-                            self.select_relation(relation);
-                            if matches!(mode, Mode::Structure | Mode::NewTable) {
-                                self.mode = Mode::Structure;
-                            }
-                        }
-                    } else if let Some(selected) = &self.selected_relation
-                        && !self
-                            .relations
-                            .iter()
-                            .any(|r| r.schema == selected.schema && r.name == selected.name)
-                    {
-                        self.selected_relation = None;
-                        self.structure = TableStructure::default();
-                        self.table_page = TablePage::default();
+            }
+            Event::Databases(databases) => {
+                self.status = format!("{} databases available", databases.len());
+                self.databases = databases;
+            }
+            Event::Tested => self.status = "Connection test succeeded".into(),
+            Event::Disconnected => {
+                self.clear_table_tabs();
+                self.connected = None;
+                self.databases.clear();
+                self.relations.clear();
+                self.query_outputs.clear();
+                self.servers_visible = true;
+                self.transaction.clear();
+                self.running.clear();
+                self.status = "Disconnected".into();
+            }
+            Event::Catalog(relations) => {
+                self.completion_catalog.relations = relations
+                    .iter()
+                    .map(|r| (r.schema.clone(), r.name.clone()))
+                    .collect();
+                self.relations = relations;
+                self.status = "Object list refreshed".into();
+                self.reopen_table_after_ddl();
+                self.reconcile_table_tabs();
+            }
+            Event::Routines(routines) => {
+                if let Some(selected) = &self.selected_routine
+                    && !routines.iter().any(|r| r.oid == selected.oid)
+                {
+                    self.selected_routine = None;
+                    if self.mode == Mode::Routine {
                         self.mode = Mode::Query;
                     }
                 }
-                Event::Routines(routines) => {
-                    if let Some(selected) = &self.selected_routine
-                        && !routines.iter().any(|r| r.oid == selected.oid)
-                    {
-                        self.selected_routine = None;
-                        if self.mode == Mode::Routine {
-                            self.mode = Mode::Query;
-                        }
-                    }
-                    self.completion_catalog.functions = routines
-                        .iter()
-                        .filter(|r| !r.procedure)
-                        .map(|r| (r.schema.clone(), r.name.clone()))
-                        .collect();
-                    self.routines = routines;
-                }
-                Event::CompletionColumns(columns) => self.completion_catalog.columns = columns,
-                Event::RoutineDefinition(oid, definition) => {
-                    if self.selected_routine.as_ref().is_some_and(|r| r.oid == oid) {
-                        self.routine_definition = Some(definition);
-                        self.status = "Definition loaded".into();
-                    }
-                }
-                Event::KeyCandidates(search, rows) => {
-                    if let Some(Dialog::KeyPicker {
-                        search: current,
-                        results,
-                        ..
-                    }) = &mut self.dialog
-                        && *current == search
-                    {
-                        *results = rows;
-                    }
-                    self.status = "Ready".into();
-                }
-                Event::Executed(description) => {
-                    self.status = description;
-                    if std::mem::take(&mut self.refresh_databases_after_ddl) {
-                        self.send(Command::Databases, "Refreshing databases...");
-                    } else {
-                        self.table_editor = None;
-                        self.send(Command::Catalog, "Refreshing objects...");
-                    }
-                }
-                Event::Loaded(structure, page) => {
-                    self.loading_rows = false;
-                    self.structure = *structure;
-                    self.table_page = page;
-                    self.page = 0;
-                    self.status = format!("Loaded in {} ms", self.table_page.elapsed_ms);
-                    self.update_row_count();
-                }
-                Event::Reloaded(structure, page, request) => {
-                    self.loading_rows = false;
-                    let request = *request;
-                    self.structure = *structure;
-                    self.table_page = page;
-                    self.sort = request.sort;
-                    self.show_filter |= !request.filter.is_empty();
-                    self.filter = request.filter.clone();
-                    self.applied_filter = request.filter;
-                    self.page = request.page;
-                    self.content.clear();
-                    self.status = format!("Refreshed in {} ms", self.table_page.elapsed_ms);
-                    self.update_row_count();
-                }
-                Event::Page(page) => {
-                    self.loading_rows = false;
-                    self.table_page = page;
-                    self.page = self.pending_page;
-                    self.status = format!("Loaded in {} ms", self.table_page.elapsed_ms);
-                    self.update_row_count();
-                }
-                Event::Counted(relation, filter, count) => {
-                    let current = self.selected_relation.as_ref().is_some_and(|selected| {
-                        selected.schema == relation.schema && selected.name == relation.name
-                    });
-                    if current && filter == self.applied_filter && !self.count_wanted {
-                        self.row_count = Some(count);
-                    }
-                    if std::mem::take(&mut self.count_wanted) {
-                        self.request_count(false);
-                    }
-                }
-                Event::Query(output) => {
-                    self.status = if output.error.is_some() {
-                        "Query failed".into()
-                    } else {
-                        format!("Finished in {} ms", output.elapsed_ms)
-                    };
-                    if let Lane::Sql(document) = lane
-                        && let Some(running) = self.running.remove(&document)
-                    {
-                        let mut output = output;
-                        self.transaction.insert(document, output.transaction);
-                        if running.kind == QueryKind::Silent {
-                            continue;
-                        }
-                        output.error_offset = output
-                            .error_offset
-                            .map(|offset| offset.saturating_sub(running.prefix));
-                        if let Some(offset) = output.error_offset {
-                            self.pending_cursor = Some((document, running.base + offset));
-                        }
-                        if let QueryKind::Explain { rollback } = running.kind {
-                            if let Some(plan) = output
-                                .results
-                                .iter()
-                                .find(|r| r.columns == ["QUERY PLAN"])
-                                .and_then(|r| r.rows.first()?.first()?.clone())
-                                .and_then(|json| crate::ui::explain::parse(&json))
-                            {
-                                self.plans.insert(document, plan);
-                            }
-                            if rollback
-                                && output.error.is_some()
-                                && self.send(
-                                    Command::QueryIn(document, "ROLLBACK".into()),
-                                    "Rolling back...",
-                                )
-                            {
-                                self.running.insert(
-                                    document,
-                                    RunningQuery {
-                                        base: 0,
-                                        prefix: 0,
-                                        kind: QueryKind::Silent,
-                                    },
-                                );
-                            }
-                        } else {
-                            self.plans.remove(&document);
-                        }
-                        self.query_base.insert(document, running.base);
-                        self.query_outputs.insert(document, output);
-                        if self
-                            .documents
-                            .get(self.document_index)
-                            .is_some_and(|d| d.id == document)
-                        {
-                            self.result_index = 0;
-                        }
-                    }
-                }
-                Event::Mutated => {
-                    self.dialog = None;
-                    self.edits.clear();
-                    self.row_count = None;
-                    self.status = "Changes saved".into();
-                    self.browse(self.page);
-                }
-                Event::Exported(rows, path) => {
-                    self.status = format!("Exported {rows} rows to {}", path.display());
-                }
-                Event::Imported(rows) => {
-                    self.status = format!("Imported {rows} rows");
-                    self.row_count = None;
-                    self.browse(self.page);
-                }
-                Event::Progress(message) => self.status = message,
-                Event::SessionClosed => {}
-                Event::Activity(sessions) => {
-                    self.status = format!("{} sessions", sessions.len());
-                    self.activity = sessions;
-                }
-                Event::Signalled(pid, delivered) => {
-                    self.status = if delivered {
-                        format!("Signal sent to process {pid}")
-                    } else {
-                        format!("Process {pid} was not found or could not be signalled")
-                    };
-                    if self.mode == Mode::Activity {
-                        self.send(Command::Activity, "Refreshing sessions...");
-                    }
-                }
-                Event::Roles(roles) => {
-                    self.status = format!("{} roles", roles.len());
-                    self.roles = roles;
-                }
-                Event::IndexReport(report) => {
-                    self.status = match report.items.len() {
-                        0 => "No index problems found".into(),
-                        1 => "1 index advisor finding".into(),
-                        n => format!("{n} index advisor findings"),
-                    };
-                    self.index_report = Some(report);
-                }
-                Event::SlowQueries(report) => {
-                    self.status = match &report.status {
-                        StatementsStatus::Ready => format!("{} statements", report.queries.len()),
-                        _ => "Query statistics are not available".into(),
-                    };
-                    self.slow_queries = Some(report);
-                }
-                Event::Notice(message) => self.warning = Some(message),
-                Event::Error(_) if lane == Lane::Sql(COUNT_SESSION) => {
-                    // Counting is best effort: a cancelled, timed-out, or failed
-                    // count leaves the total unknown without interrupting the user.
-                    if std::mem::take(&mut self.count_wanted) {
-                        self.request_count(false);
-                    }
-                }
-                Event::Error(error) => {
-                    if lane == Lane::Data && std::mem::take(&mut self.loading_rows) {
-                        // The previous rows no longer match the requested page.
-                        self.table_page = TablePage::default();
-                    }
-                    self.reopen_after_catalog = None;
-                    self.refresh_databases_after_ddl = false;
-                    if let Lane::Sql(document) = lane {
-                        self.running.remove(&document);
-                        self.transaction.remove(&document);
-                    }
-                    self.error = Some(error);
-                    self.status = "Operation failed".into();
+                self.completion_catalog.functions = routines
+                    .iter()
+                    .filter(|r| !r.procedure)
+                    .map(|r| (r.schema.clone(), r.name.clone()))
+                    .collect();
+                self.routines = routines;
+            }
+            Event::CompletionColumns(columns) => self.completion_catalog.columns = columns,
+            Event::RoutineDefinition(oid, definition) => {
+                if self.selected_routine.as_ref().is_some_and(|r| r.oid == oid) {
+                    self.routine_definition = Some(definition);
+                    self.status = "Definition loaded".into();
                 }
             }
+            Event::KeyCandidates(search, rows) => {
+                if let Some(Dialog::KeyPicker {
+                    search: current,
+                    results,
+                    ..
+                }) = &mut self.dialog
+                    && *current == search
+                {
+                    *results = rows;
+                }
+                self.status = "Ready".into();
+            }
+            Event::Executed(description) => {
+                self.status = description;
+                if std::mem::take(&mut self.refresh_databases_after_ddl) {
+                    self.send(Command::Databases, "Refreshing databases...");
+                } else {
+                    if let Some(tab) = self
+                        .table_tabs
+                        .iter_mut()
+                        .find(|tab| Some(tab.id) == self.ddl_tab)
+                    {
+                        tab.table_editor = None;
+                    }
+                    self.send(Command::Catalog, "Refreshing objects...");
+                }
+            }
+            Event::Loaded(structure, page) => {
+                self.table_tabs[self.table_index].loading_rows = false;
+                self.table_tabs[self.table_index].structure = *structure;
+                self.table_tabs[self.table_index].table_page = page;
+                self.table_tabs[self.table_index].page = 0;
+                self.status = format!(
+                    "Loaded in {} ms",
+                    self.table_tabs[self.table_index].table_page.elapsed_ms
+                );
+                self.update_row_count();
+            }
+            Event::Reloaded(structure, page, request) => {
+                self.table_tabs[self.table_index].loading_rows = false;
+                let request = *request;
+                self.table_tabs[self.table_index].structure = *structure;
+                self.table_tabs[self.table_index].table_page = page;
+                self.table_tabs[self.table_index].sort = request.sort;
+                self.table_tabs[self.table_index].show_filter |= !request.filter.is_empty();
+                self.table_tabs[self.table_index].filter = request.filter.clone();
+                self.table_tabs[self.table_index].applied_filter = request.filter;
+                self.table_tabs[self.table_index].page = request.page;
+                self.table_tabs[self.table_index].content.clear();
+                self.status = format!(
+                    "Refreshed in {} ms",
+                    self.table_tabs[self.table_index].table_page.elapsed_ms
+                );
+                self.update_row_count();
+            }
+            Event::Page(page) => {
+                self.table_tabs[self.table_index].loading_rows = false;
+                self.table_tabs[self.table_index].table_page = page;
+                self.table_tabs[self.table_index].page =
+                    self.table_tabs[self.table_index].pending_page;
+                self.status = format!(
+                    "Loaded in {} ms",
+                    self.table_tabs[self.table_index].table_page.elapsed_ms
+                );
+                self.update_row_count();
+            }
+            Event::Counted(relation, filter, count) => {
+                let current = self.table_tabs[self.table_index]
+                    .selected_relation
+                    .as_ref()
+                    .is_some_and(|selected| {
+                        selected.schema == relation.schema && selected.name == relation.name
+                    });
+                if current
+                    && filter == self.table_tabs[self.table_index].applied_filter
+                    && !self.table_tabs[self.table_index].count_wanted
+                {
+                    self.table_tabs[self.table_index].row_count = Some(count);
+                }
+                if self.table_tabs[self.table_index].count_wanted {
+                    self.request_count(true);
+                }
+            }
+            Event::Query(output) => {
+                self.status = if output.error.is_some() {
+                    "Query failed".into()
+                } else {
+                    format!("Finished in {} ms", output.elapsed_ms)
+                };
+                if let Lane::Sql(document) = lane
+                    && let Some(running) = self.running.remove(&document)
+                {
+                    let mut output = output;
+                    self.transaction.insert(document, output.transaction);
+                    if running.kind == QueryKind::Silent {
+                        return;
+                    }
+                    output.error_offset = output
+                        .error_offset
+                        .map(|offset| offset.saturating_sub(running.prefix));
+                    if let Some(offset) = output.error_offset {
+                        self.pending_cursor = Some((document, running.base + offset));
+                    }
+                    if let QueryKind::Explain { rollback } = running.kind {
+                        if let Some(plan) = output
+                            .results
+                            .iter()
+                            .find(|r| r.columns == ["QUERY PLAN"])
+                            .and_then(|r| r.rows.first()?.first()?.clone())
+                            .and_then(|json| crate::ui::explain::parse(&json))
+                        {
+                            self.plans.insert(document, plan);
+                        }
+                        if rollback
+                            && output.error.is_some()
+                            && self.send(
+                                Command::QueryIn(document, "ROLLBACK".into()),
+                                "Rolling back...",
+                            )
+                        {
+                            self.running.insert(
+                                document,
+                                RunningQuery {
+                                    base: 0,
+                                    prefix: 0,
+                                    kind: QueryKind::Silent,
+                                },
+                            );
+                        }
+                    } else {
+                        self.plans.remove(&document);
+                    }
+                    self.query_base.insert(document, running.base);
+                    self.query_outputs.insert(document, output);
+                    if self
+                        .documents
+                        .get(self.document_index)
+                        .is_some_and(|d| d.id == document)
+                    {
+                        self.result_index = 0;
+                    }
+                }
+            }
+            Event::Mutated => {
+                self.table_tabs[self.table_index].edits.clear();
+                self.table_tabs[self.table_index].row_count = None;
+                self.status = "Changes saved".into();
+                self.browse(self.table_tabs[self.table_index].page);
+            }
+            Event::Exported(rows, path) => {
+                self.status = format!("Exported {rows} rows to {}", path.display());
+            }
+            Event::Imported(rows) => {
+                self.status = format!("Imported {rows} rows");
+                self.table_tabs[self.table_index].row_count = None;
+                self.browse(self.table_tabs[self.table_index].page);
+            }
+            Event::Progress(message) => self.status = message,
+            Event::SessionClosed => {}
+            Event::Activity(sessions) => {
+                self.status = format!("{} sessions", sessions.len());
+                self.activity = sessions;
+            }
+            Event::Signalled(pid, delivered) => {
+                self.status = if delivered {
+                    format!("Signal sent to process {pid}")
+                } else {
+                    format!("Process {pid} was not found or could not be signalled")
+                };
+                if self.mode == Mode::Activity {
+                    self.send(Command::Activity, "Refreshing sessions...");
+                }
+            }
+            Event::Roles(roles) => {
+                self.status = format!("{} roles", roles.len());
+                self.roles = roles;
+            }
+            Event::IndexReport(report) => {
+                self.status = match report.items.len() {
+                    0 => "No index problems found".into(),
+                    1 => "1 index advisor finding".into(),
+                    n => format!("{n} index advisor findings"),
+                };
+                self.index_report = Some(report);
+            }
+            Event::SlowQueries(report) => {
+                self.status = match &report.status {
+                    StatementsStatus::Ready => format!("{} statements", report.queries.len()),
+                    _ => "Query statistics are not available".into(),
+                };
+                self.slow_queries = Some(report);
+            }
+            Event::Notice(message) => self.warning = Some(message),
+            Event::Error(_) if lane == Lane::Sql(COUNT_SESSION) => {
+                // Counting is best effort: a cancelled, timed-out, or failed
+                // count leaves the total unknown without interrupting the user.
+                if self.table_tabs[self.table_index].count_wanted {
+                    self.request_count(true);
+                }
+            }
+            Event::Error(error) => {
+                if lane == Lane::Data
+                    && self.data_tab.is_some()
+                    && std::mem::take(&mut self.table_tabs[self.table_index].loading_rows)
+                {
+                    // The previous rows no longer match the requested page.
+                    self.table_tabs[self.table_index].table_page = TablePage::default();
+                }
+                if lane == Lane::Data || lane == Lane::Control {
+                    self.reopen_after_catalog = None;
+                    self.ddl_tab = None;
+                    self.refresh_databases_after_ddl = false;
+                }
+                if let Lane::Sql(document) = lane {
+                    self.running.remove(&document);
+                    self.transaction.remove(&document);
+                }
+                self.error = Some(error);
+                self.status = "Operation failed".into();
+            }
+        }
+        if table_event && let Some(index) = self.table_tabs.iter().position(|tab| tab.id == visible)
+        {
+            self.table_index = index;
         }
     }
 
     /// True, with a warning, when staged grid changes would be lost.
     fn blocked_by_edits(&mut self) -> bool {
-        if self.edits.is_empty() {
+        self.stage_inline_edit();
+        if self.table_tabs[self.table_index].edits.is_empty() {
             return false;
         }
         self.warning = Some(format!(
             "Save or discard {} pending {} first (Command-S saves).",
-            self.edits.len(),
-            if self.edits.len() == 1 {
+            self.table_tabs[self.table_index].edits.len(),
+            if self.table_tabs[self.table_index].edits.len() == 1 {
                 "change"
             } else {
                 "changes"
@@ -872,33 +917,39 @@ impl PosternApp {
     }
 
     fn select_relation(&mut self, relation: Relation) {
-        if self.busy.blocks(Lane::Data) || self.blocked_by_edits() {
+        if self.busy.control || self.dialog.is_some() {
             return;
         }
-        self.back_stack.clear();
-        self.selected_relation = Some(relation.clone());
-        self.mode = Mode::Content;
-        self.table_page = TablePage::default();
-        self.structure = TableStructure::default();
-        self.sort.clear();
-        self.applied_filter = FilterSet::default();
-        self.filter = FilterSet::default();
-        self.show_filter = false;
-        self.row_count = None;
-        self.content.clear();
-        self.page = 0;
-        self.send(Command::Load(relation, self.page_size), "Loading table...");
+        if let Some(index) = self.table_tabs.iter().position(|tab| {
+            tab.selected_relation
+                .as_ref()
+                .is_some_and(|open| open.schema == relation.schema && open.name == relation.name)
+        }) {
+            self.select_table_tab(index);
+            return;
+        }
+        let tab = TableTab {
+            selected_relation: Some(relation),
+            page_size: self.table_tabs[self.table_index].page_size,
+            needs_load: true,
+            loading_rows: true,
+            ..Default::default()
+        };
+        self.add_table_tab(tab);
+        self.load_waiting_table();
     }
 
     fn browse_request(&self, page: usize) -> Option<BrowseRequest> {
         Some(BrowseRequest {
-            relation: self.selected_relation.clone()?,
-            columns: self.structure.columns.clone(),
-            filter: self.applied_filter.clone(),
-            sort: self.sort.clone(),
-            nulls: self.nulls,
+            relation: self.table_tabs[self.table_index]
+                .selected_relation
+                .clone()?,
+            columns: self.table_tabs[self.table_index].structure.columns.clone(),
+            filter: self.table_tabs[self.table_index].applied_filter.clone(),
+            sort: self.table_tabs[self.table_index].sort.clone(),
+            nulls: self.table_tabs[self.table_index].nulls,
             page,
-            page_size: self.page_size,
+            page_size: self.table_tabs[self.table_index].page_size,
         })
     }
 
@@ -907,9 +958,10 @@ impl PosternApp {
             return;
         }
         if let Some(request) = self.browse_request(page) {
-            self.pending_page = page;
-            self.content.clear();
-            self.loading_rows = self.send(Command::Browse(request), "Loading rows...");
+            self.table_tabs[self.table_index].pending_page = page;
+            self.table_tabs[self.table_index].content.clear();
+            self.table_tabs[self.table_index].loading_rows =
+                self.send(Command::Browse(request), "Loading rows...");
         }
     }
 
@@ -927,14 +979,22 @@ impl PosternApp {
             return;
         }
         match (
-            self.selected_relation.clone(),
-            self.structure.columns.is_empty(),
+            self.table_tabs[self.table_index].selected_relation.clone(),
+            self.table_tabs[self.table_index]
+                .structure
+                .columns
+                .is_empty(),
         ) {
-            (Some(relation), true) => self.select_relation(relation),
+            (Some(relation), true) => {
+                self.table_tabs[self.table_index].loading_rows = self.send(
+                    Command::Load(relation, self.table_tabs[self.table_index].page_size),
+                    "Loading table...",
+                );
+            }
             (Some(_), false) => {
-                if let Some(request) = self.browse_request(self.page) {
-                    self.content.clear();
-                    self.row_count = None;
+                if let Some(request) = self.browse_request(self.table_tabs[self.table_index].page) {
+                    self.table_tabs[self.table_index].content.clear();
+                    self.table_tabs[self.table_index].row_count = None;
                     self.send(Command::Reload(request), "Refreshing table...");
                 }
             }
@@ -948,8 +1008,8 @@ impl PosternApp {
         if self.blocked_by_edits() {
             return;
         }
-        self.applied_filter = filter;
-        self.row_count = None;
+        self.table_tabs[self.table_index].applied_filter = filter;
+        self.table_tabs[self.table_index].row_count = None;
         self.browse(0);
     }
 
@@ -959,24 +1019,24 @@ impl PosternApp {
         if self.busy.blocks(Lane::Data) || self.blocked_by_edits() {
             return;
         }
-        let previous = self.browse_request(self.page);
+        let previous = self.browse_request(self.table_tabs[self.table_index].page);
         let request = BrowseRequest {
             relation: relation.clone(),
             filter,
-            nulls: self.nulls,
-            page_size: self.page_size,
+            nulls: self.table_tabs[self.table_index].nulls,
+            page_size: self.table_tabs[self.table_index].page_size,
             ..Default::default()
         };
         if self.send(Command::Reload(request), "Opening related rows...") {
             if let Some(previous) = previous {
-                self.back_stack.push(previous);
+                self.table_tabs[self.table_index].back_stack.push(previous);
             }
-            self.selected_relation = Some(relation);
+            self.table_tabs[self.table_index].selected_relation = Some(relation);
             self.mode = Mode::Content;
-            self.table_page = TablePage::default();
-            self.structure = TableStructure::default();
-            self.row_count = None;
-            self.content.clear();
+            self.table_tabs[self.table_index].table_page = TablePage::default();
+            self.table_tabs[self.table_index].structure = TableStructure::default();
+            self.table_tabs[self.table_index].row_count = None;
+            self.table_tabs[self.table_index].content.clear();
         }
     }
 
@@ -984,11 +1044,11 @@ impl PosternApp {
         if self.busy.blocks(Lane::Data) || self.blocked_by_edits() {
             return;
         }
-        if let Some(request) = self.back_stack.pop() {
-            self.selected_relation = Some(request.relation.clone());
+        if let Some(request) = self.table_tabs[self.table_index].back_stack.pop() {
+            self.table_tabs[self.table_index].selected_relation = Some(request.relation.clone());
             self.mode = Mode::Content;
-            self.row_count = None;
-            self.content.clear();
+            self.table_tabs[self.table_index].row_count = None;
+            self.table_tabs[self.table_index].content.clear();
             self.send(Command::Reload(request), "Going back...");
         }
     }
@@ -1002,7 +1062,7 @@ impl PosternApp {
         description: &str,
         reopen: Option<(String, String)>,
     ) {
-        if statements.is_empty() || self.blocked_by_edits() {
+        if statements.is_empty() || self.blocked_by_any_row_edits() {
             return;
         }
         if self.send(
@@ -1013,6 +1073,16 @@ impl PosternApp {
             },
             "Running...",
         ) {
+            let tab = &self.table_tabs[self.table_index];
+            self.ddl_tab = tab
+                .table_editor
+                .as_ref()
+                .filter(|editor| {
+                    reopen.as_ref().is_some_and(|(schema, name)| {
+                        *schema == editor.edited.schema && name == editor.edited.name.trim()
+                    })
+                })
+                .map(|_| tab.id);
             self.reopen_after_catalog = reopen;
         }
     }
@@ -1040,28 +1110,24 @@ impl PosternApp {
     }
 
     fn save_changes(&mut self) {
-        if self.edits.is_empty() || self.busy.blocks(Lane::Data) {
+        if self.busy.blocks(Lane::Data) {
             return;
         }
-        let Some(relation) = self.selected_relation.clone() else {
+        self.stage_inline_edit();
+        if self.table_tabs[self.table_index].edits.is_empty() {
+            return;
+        }
+        let Some(relation) = self.table_tabs[self.table_index].selected_relation.clone() else {
             return;
         };
-        if let Some(editor) = self.content.editor.take()
-            && let Some(value) = editor.change()
-        {
-            self.edits.set(
-                &self.table_page.result.rows,
-                editor.row,
-                editor.column,
-                value,
-            );
-        }
-        let changes = self.edits.to_changes(&self.table_page.result.rows);
+        let changes = self.table_tabs[self.table_index]
+            .edits
+            .to_changes(&self.table_tabs[self.table_index].table_page.result.rows);
         self.send(
             Command::ApplyChanges(
                 MutationTarget {
                     relation,
-                    columns: self.structure.columns.clone(),
+                    columns: self.table_tabs[self.table_index].structure.columns.clone(),
                 },
                 changes,
             ),
@@ -1070,15 +1136,20 @@ impl PosternApp {
     }
 
     fn discard_changes(&mut self) {
-        self.edits.clear();
-        self.content.editor = None;
+        if self.busy.blocks(Lane::Data) {
+            return;
+        }
+        self.table_tabs[self.table_index].edits.clear();
+        self.table_tabs[self.table_index].content.editor = None;
         self.status = "Changes discarded".into();
     }
 
     /// Key for per-table settings: the connection, database, and table.
     fn table_key(&self) -> Option<String> {
         let profile = self.connected.as_ref()?;
-        let relation = self.selected_relation.as_ref()?;
+        let relation = self.table_tabs[self.table_index]
+            .selected_relation
+            .as_ref()?;
         Some(format!(
             "{}/{}/{}",
             profile.id,
@@ -1116,11 +1187,15 @@ impl PosternApp {
 
     fn can_edit(&self) -> bool {
         !self.busy.blocks(Lane::Data)
-            && self
+            && self.table_tabs[self.table_index]
                 .selected_relation
                 .as_ref()
                 .is_some_and(Relation::is_table)
-            && self.structure.columns.iter().any(|c| c.primary_key)
+            && self.table_tabs[self.table_index]
+                .structure
+                .columns
+                .iter()
+                .any(|c| c.primary_key)
     }
 
     /// Marks the selected loaded rows for deletion and removes selected new rows.
@@ -1129,8 +1204,16 @@ impl PosternApp {
         if self.mode != Mode::Content || self.servers_visible || self.dialog.is_some() {
             return;
         }
-        let loaded = self.table_page.result.rows.len();
-        let selected: Vec<usize> = self.content.selection.indices().collect();
+        let loaded = self.table_tabs[self.table_index]
+            .table_page
+            .result
+            .rows
+            .len();
+        let selected: Vec<usize> = self.table_tabs[self.table_index]
+            .content
+            .selection
+            .indices()
+            .collect();
         if selected.is_empty() {
             return;
         }
@@ -1141,29 +1224,46 @@ impl PosternApp {
             );
             return;
         }
-        self.edits.delete(loaded, selected);
-        self.content.clear();
+        self.table_tabs[self.table_index]
+            .edits
+            .delete(loaded, selected);
+        self.table_tabs[self.table_index].content.clear();
     }
 
     fn stage_insert(&mut self) {
-        if self.structure.columns.is_empty()
-            || !self
+        if self.busy.blocks(Lane::Data) {
+            return;
+        }
+        if self.table_tabs[self.table_index]
+            .structure
+            .columns
+            .is_empty()
+            || !self.table_tabs[self.table_index]
                 .selected_relation
                 .as_ref()
                 .is_some_and(Relation::is_table)
         {
             return;
         }
-        let index = self.edits.add_row(self.structure.columns.len());
-        let row = self.table_page.result.rows.len() + index;
-        self.content.selection.click(row, false);
-        let first = self
+        let tab = &mut self.table_tabs[self.table_index];
+        let index = tab.edits.add_row(tab.structure.columns.len());
+        let row = self.table_tabs[self.table_index]
+            .table_page
+            .result
+            .rows
+            .len()
+            + index;
+        self.table_tabs[self.table_index]
+            .content
+            .selection
+            .click(row, false);
+        let first = self.table_tabs[self.table_index]
             .structure
             .columns
             .iter()
             .position(|c| !c.generated)
             .unwrap_or(0);
-        self.content.cell = Some((row, first));
+        self.table_tabs[self.table_index].content.cell = Some((row, first));
     }
 
     fn run_query(&mut self, scope: RunScope) {
@@ -1443,7 +1543,7 @@ impl PosternApp {
         }
         let in_table = matches!(
             self.mode,
-            Mode::Content | Mode::Structure | Mode::Definition
+            Mode::Content | Mode::Structure | Mode::Definition | Mode::NewTable
         ) && !self.servers_visible;
         let in_query = self.mode == Mode::Query && !self.servers_visible;
         match action {
@@ -1461,6 +1561,9 @@ impl PosternApp {
             Action::Save if in_table => self.save_changes(),
             Action::Save if in_query => self.save_sql(false),
             Action::SaveAs if in_query => self.save_sql(true),
+            Action::CloseQuery if in_table => {
+                self.request_close_table(self.table_tabs[self.table_index].id)
+            }
             Action::CloseQuery if in_query => self.request_remove_document(self.document_index),
             Action::Format if in_query => self.format_sql(),
             Action::Find if in_query => self.open_find(),
@@ -1472,9 +1575,13 @@ impl PosternApp {
             Action::DeleteRows if self.mode == Mode::Content => self.stage_delete(),
             Action::DiscardChanges => self.discard_changes(),
             Action::ToggleFilter if self.mode == Mode::Content => {
-                self.show_filter = !self.show_filter;
+                self.table_tabs[self.table_index].show_filter =
+                    !self.table_tabs[self.table_index].show_filter;
             }
-            Action::ToggleDetails => self.show_details = !self.show_details,
+            Action::ToggleDetails => {
+                self.table_tabs[self.table_index].show_details =
+                    !self.table_tabs[self.table_index].show_details
+            }
             Action::Back => self.go_back(),
             Action::Servers if self.connected.is_some() => {
                 self.servers_visible = !self.servers_visible;
@@ -1543,7 +1650,7 @@ impl eframe::App for PosternApp {
             },
         );
         if ctx.input(|i| i.viewport().close_requested())
-            && !self.edits.is_empty()
+            && self.table_tabs.iter().any(TableTab::has_changes)
             && !self.allow_close
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);

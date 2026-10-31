@@ -26,7 +26,7 @@ impl PosternApp {
                 ui.add_enabled_ui(!data_busy, |ui| {
                     ui.menu_button("+", |ui| {
                         if ui.button("New table...").clicked() {
-                            let schema = self
+                            let schema = self.table_tabs[self.table_index]
                                 .selected_relation
                                 .as_ref()
                                 .map_or_else(|| "public".to_owned(), |r| r.schema.clone());
@@ -58,7 +58,7 @@ impl PosternApp {
             .id_salt("relations")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add_enabled_ui(!data_busy, |ui| {
+                ui.add_enabled_ui(!self.busy.control, |ui| {
                     let mut schema = "";
                     for relation in &self.relations {
                         let nested = search.is_empty()
@@ -223,12 +223,16 @@ impl PosternApp {
         relation: &Relation,
         request: &mut Option<ObjectRequest>,
     ) {
-        let chosen = self.selected_relation.as_ref().is_some_and(|selected| {
-            selected.schema == relation.schema && selected.name == relation.name
-        }) && matches!(
-            self.mode,
-            Mode::Content | Mode::Structure | Mode::Definition
-        );
+        let chosen = self.table_tabs[self.table_index]
+            .selected_relation
+            .as_ref()
+            .is_some_and(|selected| {
+                selected.schema == relation.schema && selected.name == relation.name
+            })
+            && matches!(
+                self.mode,
+                Mode::Content | Mode::Structure | Mode::Definition
+            );
         let kind = match relation.kind.as_str() {
             "r" | "p" => "table",
             "m" => "materialized",

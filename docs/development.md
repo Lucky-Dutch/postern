@@ -39,6 +39,11 @@ the synthetic data. Set `POSTERN_SMOKE_SCREENS` to a space-separated list to
 capture fewer views and `POSTERN_SMOKE_DEBUG=1` to trace the harness. It is not
 full mouse and keyboard coverage.
 
+The `tabs` and `tabs_light` scenarios exercise table switching with pending edits,
+independent filters and selection, a background load, saving and restoring a row
+while another tab is selected, closing tabs, and preventing a database switch
+with edits in an inactive tab. They leave the fixture values unchanged.
+
 On macOS, the `clipboard` scenario also verifies native copy and paste,
 including a SQL editor selection with Unicode and a newline. It replaces the
 system clipboard with fixture text. Run it on its own with:
